@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,15 +17,35 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type options struct {
+    all bool
+    url *url.URL
+    timeout int
+    merge bool
+    delete bool
+    verbose bool
+}
+
 var downloadCmd = &cobra.Command{
     Use:   "download",
-    Short: "Download a file from the internet",
-    Long: `Download a file from the internet long description`,
+    Short: "Download audio books",
+    Long: `Download audio books from https://goldenaudiobook.com/ for free`,
     Run: func(cmd *cobra.Command, args []string) {
 
-        allFlag, _ := cmd.Flags().GetBool("all")
+        o := options{}
+
         urlFlag, _ := cmd.Flags().GetString("url")
+        allFlag, _ := cmd.Flags().GetBool("all")
         timeoutFlag, _ := cmd.Flags().GetInt("timeout")
+        mergeFlag, _ := cmd.Flags().GetBool("merge")
+        deleteFlag, _ := cmd.Flags().GetBool("delete")
+        verboseFlag, _ := cmd.Flags().GetBool("verbose")
+
+        o.all = allFlag
+        o.timeout = timeoutFlag
+        o.merge = mergeFlag
+        o.delete = deleteFlag
+        o.verbose = verboseFlag
 
         if urlFlag == "" {
             fmt.Println("URL is required")
@@ -38,56 +60,47 @@ var downloadCmd = &cobra.Command{
             return
         }
 
-        find_audios(u, allFlag, timeoutFlag)
+        o.url = u
+
+        find_audios(o)
     },
 }
 
 func init() {
     rootCmd.AddCommand(downloadCmd)
-    downloadCmd.Flags().BoolP("all", "a", false, "Download all files in a book")
-    downloadCmd.Flags().StringP("url", "u", "", "URL to download")
-    downloadCmd.Flags().IntP("timeout", "t", 0, "HTTP timeout in seconds")
+    downloadCmd.Flags().BoolP("all", "a", true, "Download all the audio files - Default is true")
+    downloadCmd.Flags().StringP("url", "u", "", "URL to download audio books")
+    downloadCmd.Flags().IntP("timeout", "t", 0, "HTTP timeout in seconds - Default is 0")
+    downloadCmd.Flags().BoolP("merge", "m", false, "Merge all the audio files into one - Default is false")
+    downloadCmd.Flags().BoolP("delete", "d", false, "Delete temp files after downloading - Default is false")
+    downloadCmd.Flags().BoolP("verbose", "v", false, "Show output of ffmpeg command - Default is false")
 }
 
-// each piece is a part of a music file to be download and concatenated laters on
-type piece struct {
-    url string
-    start int
-    end int
-    order int
-    downloaded bool
-}
-
-type book []piece
-
-func (b *book) addPiece(newPiece piece) {
-    *b = append(*b, newPiece)
-}
-
-func find_audios(url *url.URL, all bool, timeout int) {
-    fmt.Println("URL:", url)
-    fmt.Println("Downloading file...")
+func find_audios(o options) {
 
     client := http.Client{}
-    if timeout != 0 && timeout > 0 {
-        client.Timeout = time.Duration(timeout) * time.Second
+    if o.timeout != 0 && o.timeout > 0 {
+        client.Timeout = time.Duration(o.timeout) * time.Second
     }
 
-    testUrl := "https://goldenaudiobook.com/rich-dad-poor-dad/"
-    resp, err := client.Get(testUrl)
+    resp, err := client.Get(o.url.String())
     if err != nil {
         fmt.Println("Error:", err)
         return
     }
     defer resp.Body.Close()
-    fmt.Println("Status code:", resp.StatusCode)
+
+    if status := resp.StatusCode; status != http.StatusOK {
+        fmt.Println("Error: status code", status)
+        return
+    }
 
     doc, err := goquery.NewDocumentFromReader(resp.Body)
     if err != nil {
         log.Fatal(err)
     }
 
-    fmt.Println("Finding media elements...")
+    fmt.Println("Finding audio files...")
 
     var audioUrls []string
 
@@ -97,9 +110,60 @@ func find_audios(url *url.URL, all bool, timeout int) {
     wg.Add(len(audioUrls))
 
     for _, url := range audioUrls {
-        go downloadAudio(url, &wg)
+        go downloadAudio(url, &wg, o.timeout)
     }
     wg.Wait()
+
+    fmt.Println("")
+    fmt.Println("Finished downloading files")
+
+    if !o.merge {
+        return
+    }
+    var filenames []string
+    for _, url := range audioUrls {
+        filenames = append(filenames, path.Base(url))
+    }
+
+    outputName := strings.Split(path.Base(o.url.Path), ".")[0] + ".mp3"
+    fmt.Println("Merging files...")
+    mergeFiles(outputName, filenames, o.verbose)
+
+    if !o.delete {
+        return
+    }
+
+    fmt.Println("Deleting temp files...")
+    for _, filename := range filenames {
+        err := os.Remove(filename)
+        if err != nil {
+            fmt.Println("Error while deleting", filename, "-", err)
+        }
+    }
+    fmt.Println("Finished deleting temp files")
+    fmt.Println("Enjoy your educational research 0_o!")
+
+}
+
+func mergeFiles(outputName string, audioUrls []string, verbose bool) {
+    _, err := exec.LookPath("ffmpeg")
+    if err != nil {
+        fmt.Println("ffmpeg not found in PATH")
+        return
+    }
+	args := []string{"-y", "-i", "concat:" + strings.Join(audioUrls, "|"), "-acodec", "copy", outputName}
+    cmd := exec.Command("ffmpeg", args...)
+    if verbose {
+        cmd.Stdout = os.Stdout
+        cmd.Stderr = os.Stderr
+    }
+
+    err = cmd.Run()
+    if err != nil {
+        fmt.Println("Error while merging files:", err)
+    }
+    fmt.Println("Merging finished")
+    fmt.Println("")
 }
 
 func findMediaElements(urls *[]string, doc *goquery.Document) {
@@ -108,7 +172,7 @@ func findMediaElements(urls *[]string, doc *goquery.Document) {
     })
 }
 
-func downloadAudio(url string, wg *sync.WaitGroup) {
+func downloadAudio(url string, wg *sync.WaitGroup, timeout int) {
     defer wg.Done()
 
     fmt.Println("Downloading ", url)
@@ -120,7 +184,12 @@ func downloadAudio(url string, wg *sync.WaitGroup) {
     }
     defer output.Close()
 
-    response, err := http.Get(url)
+    client := http.Client{}
+    if timeout != 0 && timeout > 0 {
+        client.Timeout = time.Duration(timeout) * time.Second
+    }
+    response, err := client.Get(url)
+
     if err != nil {
         fmt.Println("Error while downloading", url, "-", err)
         return
