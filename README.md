@@ -2,7 +2,7 @@
 
 ## About The Project
 
-Download the free audio books from https://goldenaudiobook.com, this project is only for educational purposes and you should pay for
+Download free audio books from https://goldenaudiobook.com and https://dailyaudiobooks.com, this project is only for educational purposes and you should pay for
 the books your read (or listen). 
 
 
